@@ -1,7 +1,9 @@
 """Coleta e prepara os match logs de goleiros do Vasco no FBref.
 
-Essa tabela adiciona chutes no alvo sofridos (SoTA), defesas, percentual de
-defesas e clean sheets à análise de gols sofridos.
+A página do FBref contém duas tabelas com a mesma estrutura: "For Vasco da Gama"
+e "Against Vasco da Gama". Para medir a defesa do Vasco precisamos SEMPRE da
+primeira: nela SoTA representa finalizações no alvo sofridas pelo Vasco e GA os
+gols sofridos pelo clube.
 """
 from __future__ import annotations
 
@@ -18,19 +20,23 @@ def fetch_tables(url: str) -> list[pd.DataFrame]:
     headers = {"User-Agent": "Mozilla/5.0 (educational football analytics project)"}
     r = requests.get(url, headers=headers, timeout=30)
     r.raise_for_status()
-    # FBref frequentemente mantém tabelas dentro de comentários HTML.
     html = r.text.replace("<!--", "").replace("-->", "")
-    return pd.read_html(StringIO(html))
+    return pd.read_html(StringIO(html), attrs={"id": "matchlogs_for"})
 
 
 def select_table(tables: list[pd.DataFrame]) -> pd.DataFrame:
+    """Seleciona apenas a tabela 'For Vasco da Gama'.
+
+    O filtro por id=matchlogs_for no read_html é a proteção principal. Esta
+    validação adicional impede que uma mudança de HTML passe silenciosamente.
+    """
     for df in tables:
         flat = [str(c[-1] if isinstance(c, tuple) else c).strip() for c in df.columns]
-        if "SoTA" in flat and "Saves" in flat and "Opponent" in flat:
-            df = df.copy()
-            df.columns = flat
-            return df
-    raise ValueError("Tabela de goalkeeping não encontrada.")
+        if {"Date", "Opponent", "SoTA", "Saves", "Save%"}.issubset(flat):
+            out = df.copy()
+            out.columns = flat
+            return out
+    raise ValueError("Tabela 'For Vasco da Gama' de goalkeeping não encontrada.")
 
 
 def normalize(df: pd.DataFrame) -> pd.DataFrame:
