@@ -7,8 +7,7 @@ KEEPERS = Path("data/processed/vasco_goalkeeping_2026.csv")
 OUTPUT = Path("data/processed/manager_summary.csv")
 MATCH_OUTPUT = Path("data/processed/serie_a_matches_with_manager.csv")
 
-# Recortes baseados no técnico efetivamente à beira do campo.
-# Diniz: até 22/02; Renato estreia em 12/03; Pedro estreia em 16/07.
+# Técnico efetivamente à beira do campo.
 MANAGER_PERIODS = [
     ("Fernando Diniz", "2026-01-01", "2026-02-22"),
     ("Renato Gaúcho", "2026-03-12", "2026-06-18"),
@@ -32,12 +31,25 @@ def is_serie_a(value: object) -> bool:
 def prepare_matches(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
     df["date"] = pd.to_datetime(df["date"], errors="coerce")
+    # Partidas adiadas/futuras não possuem placar e são descartadas aqui.
+    df["goals_against"] = pd.to_numeric(df["goals_against"], errors="coerce")
     df = df.dropna(subset=["date", "goals_against"])
     if "competition" in df.columns:
         df = df[df["competition"].map(is_serie_a)]
     df["manager"] = df["date"].apply(assign_manager)
     df["clean_sheet"] = (df["goals_against"] == 0).astype(int)
     return df.sort_values("date")
+
+
+def validate_matches(df: pd.DataFrame) -> None:
+    if df.empty:
+        raise ValueError("Nenhuma partida válida da Série A foi encontrada.")
+    duplicated = df.duplicated(subset=[c for c in ["date", "opponent"] if c in df.columns])
+    if duplicated.any():
+        raise ValueError("Há partidas duplicadas na base processada.")
+    if (df["goals_against"] < 0).any():
+        raise ValueError("Foram encontrados gols sofridos negativos.")
+    print(f"Controle da base: {len(df)} jogos, {int(df['goals_against'].sum())} gols sofridos.")
 
 
 def add_goalkeeping(matches: pd.DataFrame) -> pd.DataFrame:
@@ -50,13 +62,17 @@ def add_goalkeeping(matches: pd.DataFrame) -> pd.DataFrame:
     cols = ["date", "opponent", "shots_on_target_against", "saves", "save_pct"]
     cols = [c for c in cols if c in keepers.columns]
     keys = [c for c in ["date", "opponent"] if c in matches.columns and c in keepers.columns]
-    return matches.merge(keepers[cols], on=keys, how="left") if keys else matches
+    if not keys:
+        return matches
+    keepers = keepers[cols].drop_duplicates(subset=keys)
+    merged = matches.merge(keepers, on=keys, how="left", validate="one_to_one")
+    return merged
 
 
 def summarize(df: pd.DataFrame) -> pd.DataFrame:
     main = df[df["manager"].isin(MANAGERS)].copy()
     agg = {
-        "date": ("date", "count"),
+        "matches": ("date", "count"),
         "goals_against": ("goals_against", "sum"),
         "goals_against_per_match": ("goals_against", "mean"),
         "clean_sheets": ("clean_sheet", "sum"),
@@ -64,11 +80,10 @@ def summarize(df: pd.DataFrame) -> pd.DataFrame:
     }
     if "shots_on_target_against" in main.columns:
         agg["shots_on_target_against_per_match"] = ("shots_on_target_against", "mean")
-    if "save_pct" in main.columns:
-        agg["save_pct"] = ("save_pct", "mean")
+    if "saves" in main.columns:
+        agg["saves_per_match"] = ("saves", "mean")
     summary = main.groupby("manager", sort=False).agg(**agg).reset_index()
-    summary = summary.rename(columns={"date": "matches"})
-    summary["clean_sheet_rate"] = summary["clean_sheet_rate"] * 100
+    summary["clean_sheet_rate"] *= 100
     return summary.round(2)
 
 
@@ -76,6 +91,7 @@ def main() -> None:
     if not MATCHES.exists():
         raise FileNotFoundError(f"Base não encontrada: {MATCHES}")
     matches = prepare_matches(pd.read_csv(MATCHES))
+    validate_matches(matches)
     matches = add_goalkeeping(matches)
     MATCH_OUTPUT.parent.mkdir(parents=True, exist_ok=True)
     matches.to_csv(MATCH_OUTPUT, index=False)
